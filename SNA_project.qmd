@@ -1,0 +1,308 @@
+---
+title: "SNA project"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+############################################################
+# 0. Packages
+############################################################
+#install.packages(c("sf", "rnaturalearth", "dplyr", "ggplot2", "viridis"))
+library(sf)
+library(rnaturalearth)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+
+############################################################
+# 1. World polygons (admin-0 countries)
+############################################################
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+# Inspect the country name column
+head(world$admin)
+
+############################################################
+# 2. Read your CSVs (adjust paths if needed)
+############################################################
+
+base_df <- read.csv("country_baseline_accessibility.csv", stringsAsFactors = FALSE)
+p1_df   <- read.csv("country_vulnerability_p1.csv",  stringsAsFactors = FALSE)
+p5_df   <- read.csv("country_vulnerability_p5.csv",  stringsAsFactors = FALSE)
+p10_df  <- read.csv("country_vulnerability_p10.csv", stringsAsFactors = FALSE)
+
+# Each of these has at least: country, AC_base, EAL_C_hat, rEAL_C_hat
+
+############################################################
+# 3. Country name mapping
+############################################################
+
+# Map from your 'country' names to rnaturalearth's 'admin' names
+name_map <- c(
+  "United States"       = "United States of America",
+  "Cote d'Ivoire"       = "Côte d'Ivoire",
+  "Congo (Brazzaville)" = "Republic of the Congo",
+  "Congo (Kinshasa)"    = "Democratic Republic of the Congo",
+  "Russia"              = "Russia",
+  "Bolivia"             = "Bolivia (Plurinational State of)",
+  "Venezuela"           = "Venezuela (Bolivarian Republic of)"
+  # Add more here if needed when you see unmatched countries
+)
+
+# Helper to add a column with the join key
+add_admin_join <- function(df) {
+  df %>%
+    mutate(
+      admin_join = dplyr::recode(country, !!!name_map, .default = country)
+    )
+}
+
+base_df  <- add_admin_join(base_df)
+p1_df    <- add_admin_join(p1_df)
+p5_df    <- add_admin_join(p5_df)
+p10_df   <- add_admin_join(p10_df)
+
+############################################################
+# 4. Helper to join and plot a choropleth
+############################################################
+
+join_world <- function(metric_df) {
+  world %>%
+    left_join(metric_df, by = c("admin" = "admin_join"))
+}
+
+plot_choropleth <- function(world_metric, value_col, title, na_color = "grey90") {
+  ggplot(world_metric) +
+    geom_sf(aes_string(fill = value_col), color = NA) +
+    scale_fill_viridis(option = "C", na.value = na_color) +
+    labs(fill = value_col, title = title) +
+    theme_minimal() +
+    theme(
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      panel.grid = element_blank()
+    )
+}
+
+############################################################
+# 5. Baseline accessibility map
+############################################################
+
+world_base <- join_world(base_df)
+
+# Quick check: which countries are unmatched (NA AC_base)?
+unmatched_base <- world_base %>%
+  filter(!is.na(admin) & is.na(AC_base)) %>%
+  select(admin) %>%
+  distinct()
+head(unmatched_base)  # use this to refine name_map if needed
+
+# Plot baseline AC(G)
+plot_choropleth(world_base, "AC_base", "Baseline country accessibility AC(G)")
+
+############################################################
+# 6. Vulnerability maps for p = 1%, 5%, 10%
+############################################################
+
+world_p1  <- join_world(p1_df)
+world_p5  <- join_world(p5_df)
+world_p10 <- join_world(p10_df)
+
+# Optionally set a common scale for rEAL across p to make maps comparable
+all_rEAL <- c(world_p1$rEAL_C_hat, world_p5$rEAL_C_hat, world_p10$rEAL_C_hat)
+global_min <- min(all_rEAL, na.rm = TRUE)
+global_max <- max(all_rEAL, na.rm = TRUE)
+
+plot_choropleth(
+  world_p1,
+  "rEAL_C_hat",
+  "Relative expected accessibility loss rEAL^C (p = 1%)"
+) + scale_fill_viridis(option = "C", limits = c(global_min, global_max), na.value = "grey90")
+
+plot_choropleth(
+  world_p5,
+  "rEAL_C_hat",
+  "Relative expected accessibility loss rEAL^C (p = 5%)"
+) + scale_fill_viridis(option = "C", limits = c(global_min, global_max), na.value = "grey90")
+
+plot_choropleth(
+  world_p10,
+  "rEAL_C_hat",
+  "Relative expected accessibility loss rEAL^C (p = 10%)"
+) + scale_fill_viridis(option = "C", limits = c(global_min, global_max), na.value = "grey90")
+
+```
+
+You can add options to executable code like this
+
+```{r}
+############################################################
+# Packages
+############################################################
+#install.packages(c("ergm", "network", "geosphere", "dplyr"))
+library(ergm)
+library(network)
+library(geosphere)
+library(dplyr)
+
+############################################################
+# 1. Read node and edge data
+############################################################
+
+nodes <- read.csv("airports_cc_nodes.csv", stringsAsFactors = FALSE)
+edges <- read.csv("airports_cc_edges.csv", stringsAsFactors = FALSE)
+
+n <- nrow(nodes)
+
+# Map airport_id -> 1..n
+id_map <- setNames(seq_len(n), nodes$airport_id)
+
+edges_i <- id_map[as.character(edges$from_airport_id)]
+edges_j <- id_map[as.character(edges$to_airport_id)]
+
+g <- network.initialize(n, directed = FALSE)
+add.edges(g, tail = edges_i, head = edges_j)
+
+# Attach attributes
+set.vertex.attribute(g, "airport_id", nodes$airport_id)
+set.vertex.attribute(g, "country",    nodes$country)
+set.vertex.attribute(g, "name",       nodes$name)
+set.vertex.attribute(g, "city",       nodes$city)
+
+# Coordinates matrix (lon, lat) for distance
+coords <- as.matrix(nodes[, c("longitude", "latitude")])
+
+############################################################
+# 3. Edge covariate: log distance
+############################################################
+
+# Great-circle distances (in meters)
+dist_mat_m <- distm(coords, fun = distHaversine)
+# Convert to km and transform
+dist_mat_km <- dist_mat_m / 1000
+log_dist <- log(dist_mat_km + 1)  # add 1 to avoid log(0)
+
+# Ensure it's a standard matrix with correct dim
+log_dist <- matrix(log_dist, nrow = n, ncol = n)
+
+############################################################
+# Quick checks
+############################################################
+
+g
+summary(g)
+table(get.vertex.attribute(g, "country"))[1:10]
+
+```
+
+```{r}
+############################################################
+# 4. Fit ERGM
+############################################################
+
+set.seed(123)
+
+model1 <- ergm(
+  g ~ edges +
+        gwesp(0.5, fixed = TRUE) +
+        nodematch("country", diff = FALSE) +
+        edgecov(log_dist),
+  control = control.ergm(
+    MCMLE.maxit   = 20,
+    MCMC.interval = 1e4,
+    MCMC.burnin   = 5e4,
+    MCMC.samplesize = 1e4
+  )
+)
+
+summary(model1)
+
+```
+
+```{r}
+############################################################
+# 5. GOF diagnostics
+############################################################
+
+gof1 <- gof(model1, GOF = ~ degree + distance + espartners + triadcensus)
+print(gof1)
+plot(gof1)
+
+```
+
+```{r}
+# Example extension with degree term:
+model2 <- ergm(
+  g ~ edges +
+        gwesp(0.5, fixed = TRUE) +
+        nodematch("country", diff = FALSE) +
+        edgecov(log_dist) +
+        gwdegree(0.5, fixed = TRUE),
+  control = control.ergm(
+    MCMLE.maxit   = 20,
+    MCMC.interval = 1e4,
+    MCMC.burnin   = 5e4,
+    MCMC.samplesize = 1e4
+  )
+)
+
+summary(model2)
+gof2 <- gof(model2, GOF = ~ degree + distance + espartners + triadcensus)
+plot(gof2)
+
+```
+```{r}
+############################################################
+# A1. Simulate nsim networks from the ERGM
+############################################################
+library(ergm)
+library(network)
+
+set.seed(123)
+
+nsim <- 50   # increase later if runtime is OK
+
+sim_list <- simulate(
+  model1,
+  nsim      = nsim,
+  output    = "network",
+  control   = control.simulate.ergm(MCMC.interval = 10000)
+)
+
+############################################################
+# A2. Export each simulated network as an edgelist with airport_id labels
+############################################################
+
+# Vertex labels from the original network (airport IDs)
+airport_ids <- get.vertex.attribute(g, "airport_id")
+
+for (s in seq_len(nsim)) {
+  g_s <- sim_list[[s]]
+
+  el <- as.edgelist(g_s)  # matrix of vertex indices (i,j)
+  if (is.null(el) || nrow(el) == 0) {
+    # If a simulated network has no edges (unlikely), skip
+    next
+  }
+
+  df_el <- data.frame(
+    from_airport_id = airport_ids[el[, 1]],
+    to_airport_id   = airport_ids[el[, 2]]
+  )
+
+  fname <- sprintf("ergm_sim_edges_%02d.csv", s)
+  write.csv(df_el, fname, row.names = FALSE)
+  cat("Wrote", fname, "with", nrow(df_el), "edges\n")
+}
+
+```
+
